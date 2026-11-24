@@ -6,6 +6,8 @@ const { TextEncoder, TextDecoder } = require('node:util');
 const jsQR = require('jsqr');
 const qrcode = require('../assets/vendor/qrcode.js');
 const { paintQR, profileFile, isLocalURL } = require('../qr-tools.js');
+const PhotoTools = require('../photo-tools.js');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 
 // Rasterize the application renderer, then decode it using an independent library.
 function raster() {
@@ -66,7 +68,7 @@ test('loopback and file targets are distinguished from accessible HTTP URLs', ()
   for (const url of ['https://user.github.io/qr/', 'http://192.168.1.5:4173/']) assert.equal(isLocalURL(new URL(url)), false);
 });
 
-function app(page, hash = '', href = 'https://example.github.io/qr/index.html') {
+function app(page, hash = '', href = 'https://example.github.io/qr/index.html', options = {}) {
   const nodes = new Map();
   function node(key) {
     if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', hidden: false, disabled: false, style: {}, dataset: {}, validity: { valid: true }, clientWidth: 340, listeners: {}, classList: { toggle() {} }, addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; } });
@@ -78,9 +80,10 @@ function app(page, hash = '', href = 'https://example.github.io/qr/index.html') 
   nodes.set('#qr-canvas', Object.assign(raster(), node('#qr-canvas')));
   const bound = keys.map((key) => ({ dataset: { bind: key }, textContent: '' }));
   const photo = [{ src: '' }];
-  const document = { body: { dataset: { page } }, querySelector: node, querySelectorAll(s) { return s === '[data-bind]' ? bound : s === '[data-profile-photo]' ? photo : []; } };
+  const document = { body: { dataset: { page } }, querySelector: node, createElement: () => ({}), querySelectorAll(s) { return s === '[data-bind]' ? bound : s === '[data-profile-photo]' ? photo : []; } };
   const window = { location: { href, hash }, devicePixelRatio: 1, addEventListener() {} };
-  const context = vm.createContext({ document, window, TextEncoder, TextDecoder, URL, Intl, Date, console, Uint8Array, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary'), qrcode, QRTools: require('../qr-tools.js'), setTimeout: () => 1, clearTimeout() {} });
+  const Image = class { set src(value) { this.onload(); } };
+  const context = vm.createContext({ document, window, TextEncoder, TextDecoder, URL, Intl, Date, console, Uint8Array, Image, PhotoTools: options.photoResult ? { preparePhoto: () => options.photoResult } : PhotoTools, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary'), qrcode, QRTools: require('../qr-tools.js'), setTimeout: () => 1, clearTimeout() {} });
   vm.runInContext(fs.readFileSync(require.resolve('../script.js'), 'utf8'), context);
   return { node, bound, photo };
 }
@@ -97,6 +100,49 @@ test('generator blocks local PNG, keeps local preview, and creates compact publi
   online.node('#profile-form').listeners.submit({ preventDefault() {} });
   assert.match(decode(online.node('#qr-canvas')), /\/qr\/profiles\/p-[a-f0-9]+\.html$/);
   assert.equal(online.node('#download-profile').disabled, false);
+});
+test('complex real JPEG and PNG photos produce usable mini and clear profile variants', async () => {
+  const canvas = createCanvas(600, 450);
+  const ctx = canvas.getContext('2d');
+  const pixels = ctx.createImageData(600, 450);
+  let seed = 7;
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    for (let color = 0; color < 3; color++) { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; pixels.data[i + color] = seed >>> 24; }
+    pixels.data[i + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  for (const mime of ['image/png', 'image/jpeg']) {
+    const source = await loadImage(canvas.toDataURL(mime));
+    const result = PhotoTools.preparePhoto(source, () => createCanvas(1, 1));
+    assert.ok(result.inline && result.inline.bytes <= PhotoTools.INLINE_LIMIT);
+    assert.ok(result.profile.bytes <= PhotoTools.PROFILE_LIMIT);
+    assert.ok(result.profile.size > result.inline.size);
+    assert.equal((await loadImage(result.profile.encoded)).width, result.profile.size);
+    const tiny = result.inline.encoded.split(',')[1].replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+    const text = direct + tiny;
+    const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+    const image = raster(); paintQR(image, qr, 2048);
+    assert.equal(decode(image), text);
+    const large = result.profile.encoded.split(',')[1].replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+    const payload = fragment.replace('v1.', 'v2.') + large;
+    const scan = app('profile', '#' + payload);
+    assert.equal(scan.node('#scan-profile').hidden, false);
+    assert.equal(scan.photo[0].src, result.profile.encoded);
+    const snapshot = profileFile(payload);
+    assert.ok(snapshot.html.includes(payload));
+    assert.equal(app('profile', '#' + fragment + large).node('#scan-error').hidden, false, 'v1 still rejects oversized photos');
+    const generator = app('generator', '', 'https://example.github.io/qr/', { photoResult: result });
+    await generator.node('#photo').listeners.change({ target: { files: [new Blob(['fixture'], { type: mime })], value: 'fixture' } });
+    generator.node('#profile-form').reportValidity = () => true;
+    generator.node('#profile-form').listeners.submit({ preventDefault() {} });
+    assert.equal(generator.node('#photo-error').textContent, '');
+    assert.equal(generator.photo[0].src, result.inline.encoded);
+    assert.equal(generator.node('#download').disabled, false);
+    generator.node('input[name="qr-mode"]:checked').value = 'compact';
+    generator.node('#profile-form').listeners.submit({ preventDefault() {} });
+    assert.ok(generator.node('#scan-link').href.includes('#v2.'));
+    assert.equal(app('profile', new URL(generator.node('#scan-link').href).hash).photo[0].src, result.profile.encoded);
+  }
 });
 test('scan page recovers exact Unicode fields, old links, invalid data, and expired dates', () => {
   const unicode = ['Éka <img src=x onerror=alert(1)>', ...values.slice(1)];

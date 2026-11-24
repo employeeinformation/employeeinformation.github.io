@@ -7,7 +7,7 @@
   const DEFAULT_PHOTO = 'assets/avatar.svg';
   const MAX_URL_BYTES = 2300;
   const MAX_PHOTO_BYTES = 1050;
-  const PHOTO_TARGET_BYTES = 550;
+  const MAX_PROFILE_PHOTO_BYTES = 24 * 1024;
   const $ = (s) => document.querySelector(s);
   const encoder = new TextEncoder();
   const base64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -31,15 +31,15 @@
     });
     document.querySelectorAll('[data-profile-photo]').forEach((node) => { node.src = profile.photo || DEFAULT_PHOTO; });
   }
-  function encodeProfile(profile) {
+  function encodeProfile(profile, version = 'v1') {
     const data = base64url(encoder.encode(JSON.stringify(KEYS.map((key) => profile[key]))));
     const photo = profile.photo ? profile.photo.split(',')[1].replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '') : '';
-    return `v1.${data}.${photo}`;
+    return `${version}.${data}.${photo}`;
   }
   function decodeProfile(fragment) {
-    if (fragment.length > 5000) throw new Error('Payload too large');
+    if (fragment.length > 38000) throw new Error('Payload too large');
     const parts = fragment.split('.');
-    if (parts.length !== 3 || parts[0] !== 'v1') throw new Error('Unsupported profile');
+    if (parts.length !== 3 || !['v1', 'v2'].includes(parts[0])) throw new Error('Unsupported profile');
     const values = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(unbase64(parts[1])));
     if (!Array.isArray(values) || values.length !== KEYS.length) throw new Error('Incomplete profile');
     values.forEach((value, i) => { if (typeof value !== 'string' || !value.trim() || value.length > LIMITS[i] || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('Invalid field'); });
@@ -48,7 +48,8 @@
     profile.photo = '';
     if (parts[2]) {
       const bytes = unbase64(parts[2]);
-      if (bytes.length > MAX_PHOTO_BYTES || bytes.length < 12 || String.fromCharCode(...bytes.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...bytes.slice(8, 12)) !== 'WEBP') throw new Error('Invalid image');
+      const photoLimit = parts[0] === 'v2' ? MAX_PROFILE_PHOTO_BYTES : MAX_PHOTO_BYTES;
+      if (bytes.length > photoLimit || bytes.length < 12 || String.fromCharCode(...bytes.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...bytes.slice(8, 12)) !== 'WEBP') throw new Error('Invalid image');
       profile.photo = `data:image/webp;base64,${btoa(String.fromCharCode(...bytes))}`;
     }
     return profile;
@@ -86,6 +87,8 @@
   }
   const form = $('#profile-form');
   let photo = '';
+  let inlinePhoto = '';
+  let photoSizes = null;
   let qrUrl = '';
   let currentQR = null;
   let staticProfile = null;
@@ -94,6 +97,19 @@
   let renderTimer;
   let toastTimer;
   const profileData = () => ({ ...Object.fromEntries(KEYS.map((key) => [key, $(`#${key}`).value.trim()])), photo });
+  function updatePhotoNote() {
+    const compact = $('input[name="qr-mode"]:checked').value === 'compact';
+    if (!photoSizes) return;
+    const selected = compact ? photoSizes.profile : photoSizes.inline;
+    if (!selected) {
+      $('#photo-note').textContent = 'Foto tersedia pada mode Ringkas. Pilih Ringkas untuk menyertakan foto.';
+      return;
+    }
+    $('#photo-note').textContent = compact ? `Foto ${selected.size} × ${selected.size} px disimpan dalam file profil HTML. Unggah file sebelum membagikan QR.` : `Foto mini ${selected.size} × ${selected.size} px ikut dalam QR. Pilih Ringkas untuk foto lebih jelas.`;
+    const shownPhoto = compact ? photo : inlinePhoto;
+    showProfile({ ...profileData(), photo: shownPhoto });
+    $('#upload-preview').src = shownPhoto || DEFAULT_PHOTO;
+  }
   function targetURL() {
     const entered = $('#base-url').value.trim();
     let url;
@@ -136,16 +152,17 @@
     }
     try {
       const url = targetURL();
-      const fragment = encodeProfile(profile);
+      const compact = $('input[name="qr-mode"]:checked').value === 'compact';
+      if (photo && !inlinePhoto && !compact) throw new Error('Pilih mode Ringkas untuk menyertakan foto ini. Foto tetap tersimpan di formulir.');
+      const fragment = encodeProfile({ ...profile, photo: compact ? photo : inlinePhoto }, compact ? 'v2' : 'v1');
       const directUrl = new URL(url.href);
       directUrl.hash = fragment;
-      const compact = $('input[name="qr-mode"]:checked').value === 'compact';
       $('#compact-help').hidden = !compact;
       staticProfile = compact ? QRTools.profileFile(fragment) : null;
       if (compact) url.pathname = url.pathname.replace(/template\.html$/, `profiles/${staticProfile.name}`);
       else url.hash = fragment;
       const value = url.href;
-      if (encoder.encode(value).length > MAX_URL_BYTES) throw new Error('Data terlalu panjang. Persingkat isian atau URL publik, atau hapus foto.');
+      if (encoder.encode(value).length > MAX_URL_BYTES) throw new Error('Data terlalu panjang untuk QR Langsung. Pilih Ringkas agar seluruh data dan foto tetap disertakan.');
       if (typeof qrcode !== 'function') throw new Error('Library QR tidak tersedia. Pastikan folder assets/vendor disertakan.');
       const qr = qrcode(0, 'M');
       qr.addData(value, 'Byte');
@@ -181,7 +198,8 @@
     }
   }
   function update() {
-    showProfile(profileData());
+    showProfile({ ...profileData(), photo: $('input[name="qr-mode"]:checked').value === 'compact' ? photo : inlinePhoto });
+    updatePhotoNote();
     clearTimeout(renderTimer);
     setQRUnavailable(photoBusy ? 'Mengoptimalkan foto…' : 'Memperbarui QR Code…');
     renderTimer = setTimeout(renderQR, 320);
@@ -219,22 +237,7 @@
     const image = new Image();
     try {
       await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('File foto tidak dapat dibaca.')); image.src = objectUrl; });
-      if (image.width * image.height > 40000000) throw new Error('Resolusi foto terlalu besar. Gunakan gambar di bawah 40 megapiksel.');
-      const canvas = document.createElement('canvas');
-      const crop = Math.min(image.naturalWidth, image.naturalHeight);
-      for (const size of [80, 64, 48, 40, 32]) {
-        canvas.width = canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#edf3fa';
-        ctx.fillRect(0, 0, size, size);
-        ctx.drawImage(image, (image.naturalWidth - crop) / 2, (image.naturalHeight - crop) / 2, crop, crop, 0, 0, size, size);
-        for (const quality of [0.5, 0.3, 0.15]) {
-          const encoded = canvas.toDataURL('image/webp', quality);
-          if (!encoded.startsWith('data:image/webp;')) throw new Error('Browser ini belum mendukung foto WebP. Gunakan Chrome, Edge, Firefox, atau Safari terbaru.');
-          if (atob(encoded.split(',')[1]).length <= PHOTO_TARGET_BYTES) return { encoded, size };
-        }
-      }
-      throw new Error('Foto terlalu kompleks untuk dimuat dalam QR. Coba foto dengan latar sederhana.');
+      return PhotoTools.preparePhoto(image, () => document.createElement('canvas'));
     } finally { URL.revokeObjectURL(objectUrl); }
   }
   $('#photo').addEventListener('change', async (event) => {
@@ -247,10 +250,16 @@
     try {
       const result = await optimizePhoto(file);
       if (revision !== photoRevision) return;
-      photo = result.encoded;
+      photoSizes = result;
+      photo = result.profile.encoded;
+      inlinePhoto = result.inline?.encoded || '';
+      if (!result.inline) {
+        $('input[name="qr-mode"][value="compact"]').checked = true;
+        notify('Foto diterima. Mode Ringkas dipilih agar foto dapat disertakan.');
+      }
       $('#upload-preview').src = photo;
       $('#remove-photo').hidden = false;
-      $('#photo-note').textContent = `Foto ${result.size} × ${result.size} px disertakan dalam tautan QR.`;
+      updatePhotoNote();
     } catch (error) {
       if (revision === photoRevision) $('#photo-error').textContent = error.message;
     } finally {
@@ -261,11 +270,13 @@
     photoRevision++;
     photoBusy = false;
     photo = '';
+    inlinePhoto = '';
+    photoSizes = null;
     $('#photo').value = '';
     $('#upload-preview').src = DEFAULT_PHOTO;
     $('#remove-photo').hidden = true;
     $('#photo-error').textContent = '';
-    $('#photo-note').textContent = 'Foto akan dioptimalkan untuk QR Code.';
+    $('#photo-note').textContent = 'Foto dioptimalkan otomatis. Mode Ringkas mempertahankan foto yang lebih jelas.';
   }
   $('#remove-photo').addEventListener('click', () => { resetPhoto(); update(); });
   $('#reset').addEventListener('click', () => {

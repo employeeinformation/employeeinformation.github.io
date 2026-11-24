@@ -10,7 +10,7 @@
     for (const byte of new TextEncoder().encode(fragment)) hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
     const name = `p-${hash.toString(16).padStart(16, '0')}.html`;
     const target = `../template.html#${fragment}`;
-    if (!/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/.test(fragment)) throw new Error('Format profil tidak valid.');
+    if (fragment.length > 38000 || !/^v[12]\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/.test(fragment)) throw new Error('Format profil tidak valid.');
     const html = `<!doctype html>\n<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url=${target}"><title>QR Studio — Profil Digital</title><style>body{font:16px/1.6 system-ui,sans-serif;background:#f3f6fb;color:#173252;margin:0;min-height:100vh;display:grid;place-content:center;padding:24px}main{max-width:420px;background:white;padding:32px;border:1px solid #e1e8f1;border-radius:12px}small{color:#6b829e;letter-spacing:2px}h1{font-size:24px}a{display:block;background:#146cf0;color:white;text-decoration:none;text-align:center;border-radius:7px;padding:12px;margin-top:24px}</style></head><body><main><small>QR STUDIO</small><h1>Membuka profil digital</h1><p>Anda akan diarahkan ke halaman profil. Jika halaman belum terbuka, gunakan tombol di bawah.</p><a href="${target}">Buka profil</a></main></body></html>\n`;
     return { name, html };
   }

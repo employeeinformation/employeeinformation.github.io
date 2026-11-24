@@ -12,8 +12,10 @@ Buka `index.html` langsung di browser modern. Isi nama, Employee ID, jabatan, de
 
 ## Memilih mode QR
 
-- **Langsung** (default): seluruh data dan foto mini dibawa dalam tautan QR. Tidak perlu mengunggah file profil terpisah. Semakin banyak data, semakin rapat pola QR. Gunakan tombol **Perbesar untuk dipindai** atau PNG asli saat memindai QR berfoto.
-- **Ringkas**: QR hanya membawa URL singkat ke file profil statis. Polanya lebih sederhana, seperti QR tautan biasa. Klik **Unduh file profil HTML**, taruh file tersebut di folder `profiles/`, lalu unggah bersama proyek ke GitHub Pages. Setelah file tersedia online, unduh dan bagikan PNG QR. File profil meneruskan pengunjung ke `template.html` dengan data dan foto yang sama. Tidak menggunakan database atau pemendek URL pihak ketiga.
+- **Langsung** (default): seluruh data dan foto mini dibawa dalam tautan QR. Foto otomatis diperkecil menjadi 8–80 px dengan batas 900 byte. Tidak perlu mengunggah file profil terpisah. Semakin banyak data, semakin rapat pola QR. Gunakan tombol **Perbesar untuk dipindai** atau PNG asli saat memindai QR berfoto.
+- **Ringkas**: QR hanya membawa URL singkat ke file profil statis. Foto dapat mencapai 256 × 256 px (maksimal 24 KB), sehingga lebih jelas dan tidak dibatasi kapasitas QR. Klik **Unduh file profil HTML**, taruh file tersebut di folder `profiles/`, lalu unggah bersama proyek ke GitHub Pages. Setelah file tersedia online, unduh dan bagikan PNG QR. File profil meneruskan pengunjung ke `template.html` dengan data dan foto yang sama. Tidak menggunakan database atau pemendek URL pihak ketiga.
+
+Unggahan JPG, PNG, dan WebP maksimal 5 MB diproses secara adaptif. Aplikasi menyiapkan versi mini serta versi profil dari foto yang sama. Jika browser tidak dapat menghasilkan foto mini yang cukup kecil, foto tetap diterima dan mode Ringkas dipilih otomatis. Berpindah mode tidak mengharuskan unggah ulang. Pratinjau menampilkan versi foto yang sesuai dengan mode pilihan.
 
 Pada mode ringkas, **Lihat halaman hasil scan** tetap membuka data langsung untuk pratinjau; tombol ini bukan bukti file profil telah dipublikasikan. Coba alamat di bagian **Alamat yang dibawa QR** setelah unggah untuk memastikan tidak 404. Perubahan profil menghasilkan nama file baru; unggah file baru tersebut sebelum membagikan QR baru. File lama dan QR lama tetap berfungsi selama file lama dipertahankan.
 
@@ -27,7 +29,7 @@ Buka `http://127.0.0.1:4173`. Server ini hanya alat pengembangan untuk menyajika
 
 ## GitHub Pages
 
-1. Unggah isi folder proyek ke repository GitHub, termasuk `assets`, `index.html`, `template.html`, `script.js`, `qr-tools.js`, `style.css`, `.nojekyll`, dan folder `profiles/` jika menggunakan mode ringkas. Folder `node_modules`, `tests`, serta `output` tidak diperlukan untuk hosting.
+1. Unggah isi folder proyek ke repository GitHub, termasuk `assets`, `index.html`, `template.html`, `script.js`, `qr-tools.js`, `photo-tools.js`, `style.css`, `.nojekyll`, dan folder `profiles/` jika menggunakan mode ringkas. Folder `node_modules`, `tests`, serta `output` tidak diperlukan untuk hosting.
 2. Buka **Settings → Pages**, pilih **Deploy from a branch**, pilih branch utama dan folder **/(root)**, lalu simpan.
 3. Setelah penerbitan selesai, buka alamat Pages yang ditampilkan GitHub (contoh `https://username.github.io/qr-generator/`).
 4. Buat dan unduh QR dari alamat publik tersebut. Halaman hasil scan otomatis menggunakan alamat publik yang sama dan mendukung repository dalam subfolder.
@@ -38,8 +40,8 @@ Jika membuat QR dari file lokal sebelum publikasi, buka **Pengaturan tautan QR**
 
 ## Cara data dibawa
 
-- Data teks UTF-8 dikodekan sebagai Base64URL dalam fragment `template.html#v1.<data>.<foto>`.
-- Foto di-crop persegi di bagian tengah, diperkecil menjadi 32–80 px, lalu dikompres WebP maksimal 550 byte untuk mengurangi kepadatan QR. Tautan lama dengan foto hingga 1.050 byte tetap didukung. Pada mode langsung, foto mini ikut tertanam dalam QR; pada mode ringkas, foto disimpan dalam file profil statis. Placeholder avatar netral dipakai bila foto tidak diunggah.
+- Data teks UTF-8 dikodekan sebagai Base64URL dalam fragment `template.html#v1.<data>.<foto>` untuk mode Langsung, atau `#v2.<data>.<foto>` pada file profil mode Ringkas.
+- Foto di-crop persegi di bagian tengah, lalu dikompres WebP secara adaptif. Versi mini maksimal 900 byte; versi profil maksimal 24 KB. Tautan v1 lama dengan foto hingga 1.050 byte tetap didukung. Versi v2 dibatasi 38.000 karakter dan tidak dimasukkan ke pola QR secara langsung. Placeholder avatar netral dipakai bila foto tidak diunggah.
 - URL dibatasi 2.300 byte. Isian atau URL yang terlalu panjang akan menonaktifkan unduhan dengan pesan agar data dipersingkat. QR memakai koreksi kesalahan M dan quiet zone minimal empat modul.
 - QR berisi snapshot. Mengubah formulir tidak mengubah QR lama; unduh QR baru setelah mengedit.
 - Tidak ada penyimpanan di localStorage, cookie, analytics, atau request ke layanan eksternal. Data formulir hilang saat halaman dimuat ulang. Pada mode ringkas, file HTML yang diunduh dan diunggah berisi snapshot data profil. Browser/hosting dapat menyimpan riwayat URL atau log akses halaman; fragment tidak dikirim dalam request HTTP.
@@ -54,6 +56,7 @@ template.html         Halaman hasil scan responsif
 style.css             Tema corporate navy dan electric blue
 script.js             Validasi, codec URL, optimasi foto, rendering QR
 qr-tools.js           Renderer piksel tajam dan ekspor file profil statis
+photo-tools.js        Optimasi foto adaptif untuk dua mode QR
 profiles/             File HTML profil untuk mode QR ringkas
 assets/logo-web.png   Versi logo yang diperkecil untuk halaman
 assets/first med.png  Aset logo asli (dipertahankan)
@@ -74,4 +77,4 @@ npm ci --ignore-scripts
 npm test
 ```
 
-`jsqr` hanya dependensi pengujian. Uji membaca raster hasil renderer menggunakan decoder independen pada ukuran preview dan ekspor, termasuk payload foto, mode ringkas, margin putih, tujuan lokal, data Unicode, dan tautan scan yang rusak. Pengujian ini tidak menggantikan percobaan kamera HP pada kondisi cahaya dan jarak nyata. Panduan margin putih: [DENSO WAVE — Securing Margin](https://www.qrcode.com/en/howto/code.html/index.html).
+`jsqr` dan `@napi-rs/canvas` hanya dependensi pengujian. Uji membaca raster hasil renderer menggunakan decoder independen pada ukuran preview dan ekspor, termasuk payload foto, mode ringkas, margin putih, tujuan lokal, data Unicode, dan tautan scan yang rusak. Gambar JPEG dan PNG kompleks sungguhan diuji melalui encoder WebP, versi foto mini dibaca kembali dari QR, dan versi profil diperiksa pada halaman scan. Pengujian ini tidak menggantikan percobaan kamera HP pada kondisi cahaya dan jarak nyata. Panduan margin putih: [DENSO WAVE — Securing Margin](https://www.qrcode.com/en/howto/code.html/index.html).
