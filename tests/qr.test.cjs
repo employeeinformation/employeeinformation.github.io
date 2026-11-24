@@ -1,0 +1,122 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { TextEncoder, TextDecoder } = require('node:util');
+const jsQR = require('jsqr');
+const qrcode = require('../assets/vendor/qrcode.js');
+const { paintQR, profileFile, isLocalURL } = require('../qr-tools.js');
+
+// Rasterize the application renderer, then decode it using an independent library.
+function raster() {
+  const canvas = { width: 0, height: 0 };
+  let pixels;
+  const ctx = { fillStyle: '#fff', fillRect(x, y, w, h) {
+    if (!pixels || pixels.length !== canvas.width * canvas.height * 4) pixels = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+    const color = this.fillStyle === '#ffffff' ? 255 : 0;
+    for (let row = y; row < y + h; row++) for (let col = x; col < x + w; col++) {
+      const i = (row * canvas.width + col) * 4;
+      pixels[i] = pixels[i + 1] = pixels[i + 2] = color;
+      pixels[i + 3] = 255;
+    }
+  } };
+  canvas.getContext = () => ctx;
+  canvas.pixels = () => pixels;
+  return canvas;
+}
+function decode(canvas) { return jsQR(canvas.pixels(), canvas.width, canvas.height, { inversionAttempts: 'dontInvert' })?.data; }
+const values = ['Rakha Pradana', 'EMP-2026-001', 'Network Engineer', 'Network Operations', 'Jakarta Selatan', '2027-12-31'];
+const fragment = `v1.${Buffer.from(JSON.stringify(values)).toString('base64url')}.`;
+const direct = `https://example.github.io/qr/template.html#${fragment}`;
+
+test('direct and compact QR decode correctly at preview and PNG sizes', () => {
+  const snapshot = profileFile(fragment);
+  const compact = `https://example.github.io/qr/profiles/${snapshot.name}`;
+  for (const text of [direct, compact]) {
+    const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+    for (const size of [(qr.getModuleCount() + 8) * 3, 2048]) {
+      const canvas = raster();
+      const metrics = paintQR(canvas, qr, size);
+      assert.ok(metrics.margin >= 4 * metrics.unit, 'four-module white margin');
+      assert.equal(decode(canvas), text, 'independent decoder recovers exact destination');
+    }
+  }
+  const qrDirect = qrcode(0, 'M'); qrDirect.addData(direct); qrDirect.make();
+  const qrCompact = qrcode(0, 'M'); qrCompact.addData(compact); qrCompact.make();
+  assert.ok(qrCompact.getModuleCount() < qrDirect.getModuleCount());
+});
+test('long photo payload also decodes and keeps the quiet zone', () => {
+  const photo = Buffer.alloc(550, 123).toString('base64url');
+  const text = direct + photo;
+  const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+  const canvas = raster();
+  paintQR(canvas, qr, 2048);
+  assert.equal(decode(canvas), text);
+});
+test('static profile snapshot preserves payload without embedding untrusted markup', () => {
+  const file = profileFile(fragment);
+  assert.match(file.name, /^p-[a-f0-9]{16}\.html$/);
+  assert.ok(file.html.includes(`../template.html#${fragment}`));
+  assert.ok(file.html.includes('<title>QR Studio — Profil Digital</title>'));
+  assert.notEqual(profileFile(fragment + 'AA').name, file.name);
+  assert.throws(() => profileFile('v1.\"><script>alert(1)</script>.'));
+});
+test('loopback and file targets are distinguished from accessible HTTP URLs', () => {
+  for (const url of ['file:///E:/Project/index.html', 'http://localhost:5500/', 'http://127.0.0.2/', 'http://[::1]/', 'http://workspace.localhost/']) assert.equal(isLocalURL(new URL(url)), true);
+  for (const url of ['https://user.github.io/qr/', 'http://192.168.1.5:4173/']) assert.equal(isLocalURL(new URL(url)), false);
+});
+
+function app(page, hash = '', href = 'https://example.github.io/qr/index.html') {
+  const nodes = new Map();
+  function node(key) {
+    if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', hidden: false, disabled: false, style: {}, dataset: {}, validity: { valid: true }, clientWidth: 340, listeners: {}, classList: { toggle() {} }, addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute(k, v) { this[k] = v; }, removeAttribute(k) { delete this[k]; } });
+    return nodes.get(key);
+  }
+  const keys = ['name', 'employeeId', 'role', 'department', 'area', 'expiry'];
+  keys.forEach((key, i) => { node(`#${key}`).value = values[i]; });
+  node('input[name="qr-mode"]:checked').value = 'direct';
+  nodes.set('#qr-canvas', Object.assign(raster(), node('#qr-canvas')));
+  const bound = keys.map((key) => ({ dataset: { bind: key }, textContent: '' }));
+  const photo = [{ src: '' }];
+  const document = { body: { dataset: { page } }, querySelector: node, querySelectorAll(s) { return s === '[data-bind]' ? bound : s === '[data-profile-photo]' ? photo : []; } };
+  const window = { location: { href, hash }, devicePixelRatio: 1, addEventListener() {} };
+  const context = vm.createContext({ document, window, TextEncoder, TextDecoder, URL, Intl, Date, console, Uint8Array, btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary'), qrcode, QRTools: require('../qr-tools.js'), setTimeout: () => 1, clearTimeout() {} });
+  vm.runInContext(fs.readFileSync(require.resolve('../script.js'), 'utf8'), context);
+  return { node, bound, photo };
+}
+test('generator blocks local PNG, keeps local preview, and creates compact public destination', () => {
+  const local = app('generator', '', 'file:///E:/Project/QR_GENERATOR/index.html');
+  assert.equal(local.node('#download').disabled, true);
+  assert.ok(local.node('#scan-link').href.startsWith('file:'));
+  assert.match(local.node('#qr-status').textContent, /Alamat masih lokal/);
+  const online = app('generator');
+  assert.equal(online.node('#download').disabled, false);
+  assert.equal(decode(online.node('#qr-canvas')), online.node('#scan-link').href);
+  online.node('input[name="qr-mode"]:checked').value = 'compact';
+  online.node('#profile-form').reportValidity = () => true;
+  online.node('#profile-form').listeners.submit({ preventDefault() {} });
+  assert.match(decode(online.node('#qr-canvas')), /\/qr\/profiles\/p-[a-f0-9]+\.html$/);
+  assert.equal(online.node('#download-profile').disabled, false);
+});
+test('scan page recovers exact Unicode fields, old links, invalid data, and expired dates', () => {
+  const unicode = ['Éka <img src=x onerror=alert(1)>', ...values.slice(1)];
+  const encoded = `#v1.${Buffer.from(JSON.stringify(unicode)).toString('base64url')}.`;
+  const scan = app('profile', encoded);
+  assert.equal(scan.bound[0].textContent, unicode[0]);
+  assert.equal(scan.node('#scan-profile').hidden, false);
+  assert.equal(app('profile', '#bad-data').node('#scan-error').hidden, false);
+  const expired = [...values]; expired[5] = '2001-01-01';
+  assert.match(app('profile', `#v1.${Buffer.from(JSON.stringify(expired)).toString('base64url')}.`).node('#expiry-status').textContent, /berakhir/);
+});
+test('missing profile and cleared form cannot leave a fabricated profile or old QR available', () => {
+  const empty = app('profile');
+  assert.equal(empty.node('#scan-profile').hidden, true);
+  assert.equal(empty.node('#scan-error-title').textContent, 'Profil belum tersedia');
+  const generator = app('generator');
+  generator.node('#reset').listeners.click();
+  assert.equal(generator.node('#name').value, '');
+  assert.equal(generator.node('#employeeId').value, '');
+  assert.equal(generator.node('#download').disabled, true);
+  assert.equal(generator.node('#download-profile').disabled, true);
+  assert.equal(generator.node('#scan-link').href, undefined);
+});

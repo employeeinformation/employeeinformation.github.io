@@ -1,0 +1,307 @@
+/* QR Studio: all profile data travels in the URL fragment, never to a database. */
+(() => {
+  'use strict';
+  const EMPTY_PROFILE = Object.freeze({ name: '', employeeId: '', role: '', department: '', area: '', expiry: '', photo: '' });
+  const KEYS = ['name', 'employeeId', 'role', 'department', 'area', 'expiry'];
+  const LIMITS = [60, 32, 60, 60, 60, 10];
+  const DEFAULT_PHOTO = 'assets/avatar.svg';
+  const MAX_URL_BYTES = 2300;
+  const MAX_PHOTO_BYTES = 1050;
+  const PHOTO_TARGET_BYTES = 550;
+  const $ = (s) => document.querySelector(s);
+  const encoder = new TextEncoder();
+  const base64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const unbase64 = (value) => {
+    if (!/^[A-Za-z0-9_-]*$/.test(value)) throw new Error('Invalid encoding');
+    return Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  };
+  function validDate(value) {
+    if (!/^20\d{2}-\d{2}-\d{2}$|^2100-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T12:00:00Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }
+  function dateLabel(value) {
+    if (!validDate(value)) return '—';
+    return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T12:00:00Z`));
+  }
+  function showProfile(profile) {
+    document.querySelectorAll('[data-bind]').forEach((node) => {
+      const key = node.dataset.bind;
+      node.textContent = key === 'expiry' ? dateLabel(profile.expiry) : profile[key] || ({ name: 'Nama karyawan', role: 'Jabatan' }[key] || '—');
+    });
+    document.querySelectorAll('[data-profile-photo]').forEach((node) => { node.src = profile.photo || DEFAULT_PHOTO; });
+  }
+  function encodeProfile(profile) {
+    const data = base64url(encoder.encode(JSON.stringify(KEYS.map((key) => profile[key]))));
+    const photo = profile.photo ? profile.photo.split(',')[1].replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '') : '';
+    return `v1.${data}.${photo}`;
+  }
+  function decodeProfile(fragment) {
+    if (fragment.length > 5000) throw new Error('Payload too large');
+    const parts = fragment.split('.');
+    if (parts.length !== 3 || parts[0] !== 'v1') throw new Error('Unsupported profile');
+    const values = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(unbase64(parts[1])));
+    if (!Array.isArray(values) || values.length !== KEYS.length) throw new Error('Incomplete profile');
+    values.forEach((value, i) => { if (typeof value !== 'string' || !value.trim() || value.length > LIMITS[i] || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('Invalid field'); });
+    if (!validDate(values[5])) throw new Error('Invalid date');
+    const profile = Object.fromEntries(KEYS.map((key, i) => [key, values[i]]));
+    profile.photo = '';
+    if (parts[2]) {
+      const bytes = unbase64(parts[2]);
+      if (bytes.length > MAX_PHOTO_BYTES || bytes.length < 12 || String.fromCharCode(...bytes.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...bytes.slice(8, 12)) !== 'WEBP') throw new Error('Invalid image');
+      profile.photo = `data:image/webp;base64,${btoa(String.fromCharCode(...bytes))}`;
+    }
+    return profile;
+  }
+  if (document.body.dataset.page === 'profile') {
+    function loadProfile() {
+      try {
+        const fragment = window.location.hash.slice(1);
+        if (!fragment) {
+          $('#scan-profile').hidden = true;
+          $('#scan-error').hidden = false;
+          $('#scan-error-title').textContent = 'Profil belum tersedia';
+          $('#scan-error-message').textContent = 'Pindai QR Code profil atau buka tautan yang dibagikan kepada Anda.';
+          return;
+        }
+        const profile = decodeProfile(fragment);
+        showProfile(profile);
+        $('#scan-profile').hidden = false;
+        $('#scan-error').hidden = true;
+        const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+        const dateParts = Object.fromEntries(today.map((part) => [part.type, part.value]));
+        const expired = profile.expiry < `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+        $('#expiry-status').textContent = expired ? 'Masa berlaku yang dicantumkan telah berakhir.' : 'Masa berlaku yang dicantumkan pembuat profil.';
+        $('#expiry-status').classList.toggle('expired', expired);
+      } catch {
+        $('#scan-profile').hidden = true;
+        $('#scan-error').hidden = false;
+        $('#scan-error-title').textContent = 'Tautan profil tidak valid';
+        $('#scan-error-message').textContent = 'Data QR tidak lengkap, rusak, atau formatnya tidak didukung. Minta tautan profil yang baru kepada pengirim.';
+      }
+    }
+    window.addEventListener('hashchange', loadProfile);
+    loadProfile();
+    return;
+  }
+  const form = $('#profile-form');
+  let photo = '';
+  let qrUrl = '';
+  let currentQR = null;
+  let staticProfile = null;
+  let photoBusy = false;
+  let photoRevision = 0;
+  let renderTimer;
+  let toastTimer;
+  const profileData = () => ({ ...Object.fromEntries(KEYS.map((key) => [key, $(`#${key}`).value.trim()])), photo });
+  function targetURL() {
+    const entered = $('#base-url').value.trim();
+    let url;
+    if (entered) {
+      url = new URL(entered);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('Gunakan URL publik http:// atau https:// yang valid.');
+      url.hash = '';
+      url.search = '';
+      if (/\/(?:index|template)\.html$/.test(url.pathname)) url.pathname = url.pathname.replace(/(?:index|template)\.html$/, 'template.html');
+      else if (url.pathname.endsWith('/')) url.pathname += 'template.html';
+      else url.pathname += '/template.html';
+    } else url = new URL('template.html', window.location.href);
+    url.hash = '';
+    url.search = '';
+    return url;
+  }
+  function setQRUnavailable(message) {
+    qrUrl = '';
+    currentQR = null;
+    staticProfile = null;
+    $('#download').disabled = true;
+    $('#expand-qr').disabled = true;
+    $('#download-profile').disabled = true;
+    $('#qr-metrics').textContent = '';
+    $('#qr-destination').textContent = '—';
+    $('#scan-link').removeAttribute('href');
+    $('#scan-link').setAttribute('aria-disabled', 'true');
+    $('#scan-link').tabIndex = -1;
+    $('#qr-canvas').hidden = true;
+    $('#qr-placeholder').hidden = false;
+    $('#qr-status').textContent = message;
+  }
+  function renderQR() {
+    if (photoBusy) return;
+    const profile = profileData();
+    const invalid = KEYS.find((key) => !profile[key] || !$(`#${key}`).validity.valid);
+    if (invalid || !validDate(profile.expiry)) {
+      setQRUnavailable('Lengkapi seluruh kolom wajib dengan data yang valid.');
+      return;
+    }
+    try {
+      const url = targetURL();
+      const fragment = encodeProfile(profile);
+      const directUrl = new URL(url.href);
+      directUrl.hash = fragment;
+      const compact = $('input[name="qr-mode"]:checked').value === 'compact';
+      $('#compact-help').hidden = !compact;
+      staticProfile = compact ? QRTools.profileFile(fragment) : null;
+      if (compact) url.pathname = url.pathname.replace(/template\.html$/, `profiles/${staticProfile.name}`);
+      else url.hash = fragment;
+      const value = url.href;
+      if (encoder.encode(value).length > MAX_URL_BYTES) throw new Error('Data terlalu panjang. Persingkat isian atau URL publik, atau hapus foto.');
+      if (typeof qrcode !== 'function') throw new Error('Library QR tidak tersedia. Pastikan folder assets/vendor disertakan.');
+      const qr = qrcode(0, 'M');
+      qr.addData(value, 'Byte');
+      qr.make();
+      const canvas = $('#qr-canvas');
+      const modules = qr.getModuleCount();
+      const available = Math.min(360, $('.qr-display').clientWidth || 320);
+      const unit = Math.max(1, Math.floor(available / (modules + 8)));
+      const cssPixels = (modules + 8) * unit;
+      const ratio = Math.max(1, Math.ceil(window.devicePixelRatio || 1));
+      QRTools.paintQR(canvas, qr, cssPixels * ratio);
+      canvas.style.width = `${cssPixels}px`;
+      canvas.style.height = `${cssPixels}px`;
+      currentQR = qr;
+      qrUrl = value;
+      canvas.hidden = false;
+      $('#qr-placeholder').hidden = true;
+      const local = QRTools.isLocalURL(url);
+      $('#download').disabled = local;
+      $('#expand-qr').disabled = false;
+      $('#download-profile').disabled = !compact;
+      $('#scan-link').href = directUrl.href;
+      $('#scan-link').removeAttribute('aria-disabled');
+      $('#scan-link').removeAttribute('tabindex');
+      $('#qr-status').textContent = local ? 'Alamat masih lokal — isi URL publik untuk QR yang dapat dibuka HP.' : compact ? 'QR ringkas · unggah file profil sebelum dibagikan' : 'QR langsung · data profil disertakan';
+      $('#qr-metrics').textContent = `${modules} × ${modules} modul · Hitam-putih · Koreksi M`;
+      $('#qr-destination').textContent = value;
+      $('#profile-file-name').textContent = compact ? `profiles/${staticProfile.name}` : '';
+      $('#local-hint').classList.toggle('local-warning', local);
+      $('#local-hint').textContent = local ? 'QR ini mengarah ke komputer Anda. Buka Pengaturan tautan QR dan isi URL GitHub Pages. Unduhan PNG dinonaktifkan sampai alamat tujuan bukan file: atau localhost.' : compact ? 'Pratinjau hasil scan membuka data langsung. Tujuan QR ringkas bergantung pada file profil yang Anda unggah.' : 'Pindai QR dari layar besar atau PNG asli. Alamat tujuan harus sudah dipublikasikan dan bisa diakses HP.';
+    } catch (error) {
+      setQRUnavailable(error.message || 'QR belum dapat dibuat. Periksa data Anda.');
+    }
+  }
+  function update() {
+    showProfile(profileData());
+    clearTimeout(renderTimer);
+    setQRUnavailable(photoBusy ? 'Mengoptimalkan foto…' : 'Memperbarui QR Code…');
+    renderTimer = setTimeout(renderQR, 320);
+  }
+  form.addEventListener('submit', (event) => { event.preventDefault(); if (form.reportValidity()) renderQR(); });
+  form.addEventListener('input', (event) => { if (event.target.id !== 'photo') update(); });
+  function notify(message) {
+    $('#toast').textContent = message;
+    $('#toast').hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 4200);
+  }
+  $('#download').addEventListener('click', () => {
+    if (!qrUrl || !currentQR || photoBusy || QRTools.isLocalURL(new URL(qrUrl))) return;
+    const exportCanvas = document.createElement('canvas');
+    QRTools.paintQR(exportCanvas, currentQR, 2048);
+    exportCanvas.toBlob((blob) => {
+      if (!blob) { notify('Gagal menyiapkan PNG. Silakan coba kembali.'); return; }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const safeId = profileData().employeeId.replace(/[^a-z0-9_-]/gi, '-').slice(0, 32) || 'profile';
+      link.download = `QR-Profile-${safeId}.png`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+      notify('QR Code PNG siap disimpan.');
+    }, 'image/png');
+  });
+  async function optimizePhoto(file) {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error('Pilih file JPG, PNG, atau WebP.');
+    if (file.size > 5 * 1024 * 1024) throw new Error('Ukuran foto maksimal 5 MB.');
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    try {
+      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('File foto tidak dapat dibaca.')); image.src = objectUrl; });
+      if (image.width * image.height > 40000000) throw new Error('Resolusi foto terlalu besar. Gunakan gambar di bawah 40 megapiksel.');
+      const canvas = document.createElement('canvas');
+      const crop = Math.min(image.naturalWidth, image.naturalHeight);
+      for (const size of [80, 64, 48, 40, 32]) {
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#edf3fa';
+        ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(image, (image.naturalWidth - crop) / 2, (image.naturalHeight - crop) / 2, crop, crop, 0, 0, size, size);
+        for (const quality of [0.5, 0.3, 0.15]) {
+          const encoded = canvas.toDataURL('image/webp', quality);
+          if (!encoded.startsWith('data:image/webp;')) throw new Error('Browser ini belum mendukung foto WebP. Gunakan Chrome, Edge, Firefox, atau Safari terbaru.');
+          if (atob(encoded.split(',')[1]).length <= PHOTO_TARGET_BYTES) return { encoded, size };
+        }
+      }
+      throw new Error('Foto terlalu kompleks untuk dimuat dalam QR. Coba foto dengan latar sederhana.');
+    } finally { URL.revokeObjectURL(objectUrl); }
+  }
+  $('#photo').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const revision = ++photoRevision;
+    photoBusy = true;
+    $('#photo-error').textContent = '';
+    update();
+    try {
+      const result = await optimizePhoto(file);
+      if (revision !== photoRevision) return;
+      photo = result.encoded;
+      $('#upload-preview').src = photo;
+      $('#remove-photo').hidden = false;
+      $('#photo-note').textContent = `Foto ${result.size} × ${result.size} px disertakan dalam tautan QR.`;
+    } catch (error) {
+      if (revision === photoRevision) $('#photo-error').textContent = error.message;
+    } finally {
+      if (revision === photoRevision) { photoBusy = false; event.target.value = ''; update(); }
+    }
+  });
+  function resetPhoto() {
+    photoRevision++;
+    photoBusy = false;
+    photo = '';
+    $('#photo').value = '';
+    $('#upload-preview').src = DEFAULT_PHOTO;
+    $('#remove-photo').hidden = true;
+    $('#photo-error').textContent = '';
+    $('#photo-note').textContent = 'Foto akan dioptimalkan untuk QR Code.';
+  }
+  $('#remove-photo').addEventListener('click', () => { resetPhoto(); update(); });
+  $('#reset').addEventListener('click', () => {
+    KEYS.forEach((key) => { $(`#${key}`).value = EMPTY_PROFILE[key]; });
+    resetPhoto();
+    update();
+    notify('Formulir profil telah dikosongkan.');
+  });
+  document.querySelectorAll('input[name="qr-mode"]').forEach((radio) => radio.addEventListener('change', update));
+  $('#download-profile').addEventListener('click', () => {
+    if (!staticProfile) return;
+    const url = URL.createObjectURL(new Blob([staticProfile.html], { type: 'text/html;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = staticProfile.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+    notify('Taruh file HTML di folder profiles/, lalu unggah ke GitHub Pages.');
+  });
+  const qrDialog = $('#qr-dialog');
+  $('#expand-qr').addEventListener('click', () => {
+    if (!currentQR) return;
+    QRTools.paintQR($('#qr-large'), currentQR, 1024);
+    $('#qr-large-note').textContent = $('#qr-status').textContent;
+    qrDialog.showModal();
+  });
+  $('#close-qr').addEventListener('click', () => qrDialog.close());
+  if (QRTools.isLocalURL(new URL(window.location.href))) $('.url-settings').open = true;
+  let resizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderQR, 150); });
+  const guide = $('#guide');
+  document.querySelectorAll('[data-guide]').forEach((button) => button.addEventListener('click', () => guide.showModal()));
+  $('#close-guide').addEventListener('click', () => guide.close());
+  guide.addEventListener('click', (event) => { if (event.target === guide) { const rect = guide.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) guide.close(); } });
+  showProfile(profileData());
+  renderQR();
+})();
